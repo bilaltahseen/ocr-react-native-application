@@ -215,33 +215,8 @@ const PdfViewerScreen: React.FC<PdfViewerScreenProps> = ({ route }) => {
     return points;
   };
 
-  // Check if a point is inside a polygon path
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const isPointInPath = (point: Point, pathString: string): boolean => {
-    // Parse the path string to extract all points
-    const pathPoints = parseSvgPath(pathString);
-
-    if (pathPoints.length < 3) {
-      return false; // Need at least 3 points to form a polygon
-    }
-
-    let inside = false;
-    for (let i = 0, j = pathPoints.length - 1; i < pathPoints.length; j = i++) {
-      const xi = pathPoints[i].x, yi = pathPoints[i].y;
-      const xj = pathPoints[j].x, yj = pathPoints[j].y;
-
-      const intersect = ((yi > point.y) !== (yj > point.y)) && (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi);
-      if (intersect) {
-        inside = !inside;
-      }
-    }
-
-    return inside;
-  };
-
   // Map OCR coordinates to view coordinates
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const mapCoordinates = (x: number, y: number, width: number, height: number) => {
+  const mapCoordinates = useCallback((x: number, y: number, width: number, height: number) => {
     // Calculate scale factors between the OCR image and the view
     const scaleX = viewLayout.width / imageSize.width;
     const scaleY = viewLayout.height / imageSize.height;
@@ -253,106 +228,106 @@ const PdfViewerScreen: React.FC<PdfViewerScreenProps> = ({ route }) => {
       width: width * scaleX,
       height: height * scaleY,
     };
-  };
+  }, [viewLayout.width, viewLayout.height, imageSize.width, imageSize.height]);
 
-  // Find words that intersect with the drawn path
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // Update findIntersectingBlocks function with all helper functions inside
   const findIntersectingBlocks = useCallback((pathString: string) => {
     if (!ocrResult) return;
 
+    // Helper function to calculate area of overlap between word and path
+    const calculateOverlapArea = (wordPoints: Point[], pathPoints: Point[]): number => {
+      // Get bounding box of the path
+      const pathMinX = Math.min(...pathPoints.map(p => p.x));
+      const pathMaxX = Math.max(...pathPoints.map(p => p.x));
+      const pathMinY = Math.min(...pathPoints.map(p => p.y));
+      const pathMaxY = Math.max(...pathPoints.map(p => p.y));
+
+      // Get bounding box of the word
+      const wordMinX = Math.min(...wordPoints.map(p => p.x));
+      const wordMaxX = Math.max(...wordPoints.map(p => p.x));
+      const wordMinY = Math.min(...wordPoints.map(p => p.y));
+      const wordMaxY = Math.max(...wordPoints.map(p => p.y));
+
+      // Calculate intersection of bounding boxes
+      const overlapMinX = Math.max(pathMinX, wordMinX);
+      const overlapMaxX = Math.min(pathMaxX, wordMaxX);
+      const overlapMinY = Math.max(pathMinY, wordMinY);
+      const overlapMaxY = Math.min(pathMaxY, wordMaxY);
+
+      // If boxes don't overlap, return 0
+      if (overlapMaxX < overlapMinX || overlapMaxY < overlapMinY) {
+        return 0;
+      }
+
+      // Calculate area of overlap
+      const overlapWidth = overlapMaxX - overlapMinX;
+      const overlapHeight = overlapMaxY - overlapMinY;
+      const overlapArea = overlapWidth * overlapHeight;
+
+      // Calculate word area
+      const wordWidth = wordMaxX - wordMinX;
+      const wordHeight = wordMaxY - wordMinY;
+      const wordArea = wordWidth * wordHeight;
+
+      // Return percentage of word area that overlaps with path
+      return (overlapArea / wordArea) * 100;
+    };
+
     const elements: IntersectingElement[] = [];
-    const blockIndices: number[] = []; // Temporary array to track block indices for fallback
+    const pathPoints = parseSvgPath(pathString);
+    
+    if (pathPoints.length < 2) return;
+
+    // Minimum overlap percentage required for selection
+    const OVERLAP_THRESHOLD = 40; // 40% overlap required
 
     ocrResult.blocks.forEach((block, blockIndex) => {
-      if (block.frame) {
-        const frame = block.frame as any;
-        const x = frame.left || frame.x || 0;
-        const y = frame.top || frame.y || 0;
-        const width = frame.width || (frame.right ? frame.right - x : 0);
-        const height = frame.height || (frame.bottom ? frame.bottom - y : 0);
+      block.lines?.forEach((line, lineIndex) => {
+        line.elements?.forEach((element, elementIndex) => {
+          if (element.frame) {
+            const frame = element.frame as any;
+            const x = frame.left || frame.x || 0;
+            const y = frame.top || frame.y || 0;
+            const width = frame.width || (frame.right ? frame.right - x : 0);
+            const height = frame.height || (frame.bottom ? frame.bottom - y : 0);
 
-        // Map coordinates from OCR space to view space
-        const mappedCoords = mapCoordinates(x, y, width, height);
+            // Map coordinates from OCR space to view space
+            const mappedCoords = mapCoordinates(x, y, width, height);
 
-        // Check if any corner of the block is inside the path
-        const corners = [
-          { x: mappedCoords.x, y: mappedCoords.y }, // Top-left
-          { x: mappedCoords.x + mappedCoords.width, y: mappedCoords.y }, // Top-right
-          { x: mappedCoords.x, y: mappedCoords.y + mappedCoords.height }, // Bottom-left
-          { x: mappedCoords.x + mappedCoords.width, y: mappedCoords.y + mappedCoords.height }, // Bottom-right
-        ];
+            // Calculate word's corner points
+            const wordPoints = [
+              { x: mappedCoords.x, y: mappedCoords.y },
+              { x: mappedCoords.x + mappedCoords.width, y: mappedCoords.y },
+              { x: mappedCoords.x, y: mappedCoords.y + mappedCoords.height },
+              { x: mappedCoords.x + mappedCoords.width, y: mappedCoords.y + mappedCoords.height }
+            ];
 
-        // Check center point too
-        corners.push({
-          x: mappedCoords.x + mappedCoords.width / 2,
-          y: mappedCoords.y + mappedCoords.height / 2
-        });
+            // Calculate overlap percentage
+            const overlapPercentage = calculateOverlapArea(wordPoints, pathPoints);
 
-        // If any corner is inside the path, consider the block as intersecting
-        let blockIntersects = false;
-        for (const corner of corners) {
-          if (isPointInPath(corner, pathString)) {
-            blockIndices.push(blockIndex);
-            blockIntersects = true;
-            break;
+            // If word overlaps significantly with the path, add it to selection
+            if (overlapPercentage >= OVERLAP_THRESHOLD) {
+              elements.push({ blockIndex, lineIndex, elementIndex });
+            }
           }
-        }
-
-        // If the block intersects, check individual words within it
-        if (blockIntersects) {
-          block.lines?.forEach((line, lineIndex) => {
-            line.elements?.forEach((element, elementIndex) => {
-              if (element.frame) {
-                const eFrame = element.frame as any;
-                const ex = eFrame.left || eFrame.x || 0;
-                const ey = eFrame.top || eFrame.y || 0;
-                const ewidth = eFrame.width || (eFrame.right ? eFrame.right - ex : 0);
-                const eheight = eFrame.height || (eFrame.bottom ? eFrame.bottom - ey : 0);
-
-                // Map coordinates from OCR space to view space
-                const eMappedCoords = mapCoordinates(ex, ey, ewidth, eheight);
-
-                // Check if any corner of the word is inside the path
-                const eCorners = [
-                  { x: eMappedCoords.x, y: eMappedCoords.y }, // Top-left
-                  { x: eMappedCoords.x + eMappedCoords.width, y: eMappedCoords.y }, // Top-right
-                  { x: eMappedCoords.x, y: eMappedCoords.y + eMappedCoords.height }, // Bottom-left
-                  { x: eMappedCoords.x + eMappedCoords.width, y: eMappedCoords.y + eMappedCoords.height }, // Bottom-right
-                  { x: eMappedCoords.x + eMappedCoords.width / 2, y: eMappedCoords.y + eMappedCoords.height / 2 } // Center
-                ];
-
-                for (const corner of eCorners) {
-                  if (isPointInPath(corner, pathString)) {
-                    elements.push({ blockIndex, lineIndex, elementIndex });
-                    break;
-                  }
-                }
-              }
-            });
-          });
-        }
-      }
+        });
+      });
     });
 
+    // Update the intersecting elements
     setIntersectingElements(elements);
 
-    // If we have intersecting elements (words), only display those
+    // If we have intersecting elements (words), display them
     if (elements.length > 0) {
-      // Extract just the selected words
-      const selectedWords = elements.map(({ blockIndex, lineIndex, elementIndex }) => {
+      const selectedTexts = elements.map(({ blockIndex, lineIndex, elementIndex }) => {
         return ocrResult.blocks[blockIndex].lines?.[lineIndex].elements?.[elementIndex].text || "";
       }).filter(text => text.length > 0);
 
-      // Join the words with spaces
-      if (selectedWords.length > 0) {
-        setSelectedText(selectedWords.join(" "));
+      if (selectedTexts.length > 0) {
+        setSelectedText(selectedTexts.join(" "));
       }
-    } else if (blockIndices.length > 0) {
-      // Fallback to blocks if no specific words were found
-      const blockText = ocrResult.blocks[blockIndices[0]].text;
-      setSelectedText(blockText);
     }
-  }, [ocrResult, isPointInPath, mapCoordinates]);
+  }, [ocrResult, mapCoordinates]);
 
   // Function to perform OCR on current page, wrapped in useCallback
   const performOCR = useCallback(async () => {
